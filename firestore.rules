@@ -1,0 +1,150 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isTeacher() {
+      return signedIn()
+        && request.auth.token.email == 'teacher@college.edu';
+    }
+
+    function devicePath(rollNumber) {
+      return /databases/$(database)/documents/studentDevices/$(rollNumber);
+    }
+
+    function studentPath(rollNumber) {
+      return /databases/$(database)/documents/students/$(rollNumber);
+    }
+
+    function attendancePath(date, rollNumber) {
+      return /databases/$(database)/documents/attendance/$(date + '_' + rollNumber);
+    }
+
+    function ownsRollNumber(rollNumber) {
+      return signedIn()
+        && exists(devicePath(rollNumber))
+        && get(devicePath(rollNumber)).data.authUid == request.auth.uid;
+    }
+
+    match /students/{rollNumber} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'fullName', 'rollNumber', 'classSection', 'hasPhone', 'createdAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'fullName', 'rollNumber', 'classSection', 'hasPhone', 'createdAt'
+        ])
+        && request.resource.data.rollNumber == rollNumber
+        && request.resource.data.fullName is string
+        && request.resource.data.fullName.size() > 0
+        && request.resource.data.fullName.size() <= 100
+        && request.resource.data.classSection is string
+        && request.resource.data.classSection.size() > 0
+        && request.resource.data.classSection.size() <= 60
+        && request.resource.data.hasPhone is bool
+        && request.resource.data.createdAt == request.time
+        && getAfter(devicePath(rollNumber)).data.authUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /studentDevices/{rollNumber} {
+      allow get: if signedIn()
+        && (!exists(devicePath(rollNumber))
+          || resource.data.authUid == request.auth.uid);
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['authUid', 'deviceId', 'linkedAt'])
+        && request.resource.data.keys().hasAll(['authUid', 'deviceId', 'linkedAt'])
+        && request.resource.data.authUid == request.auth.uid
+        && request.resource.data.deviceId is string
+        && request.resource.data.deviceId.size() >= 16
+        && request.resource.data.deviceId.size() <= 100
+        && request.resource.data.linkedAt == request.time
+        && getAfter(studentPath(rollNumber)).data.rollNumber == rollNumber;
+      allow update, delete: if false;
+    }
+
+    match /attendance/{attendanceId} {
+      allow get: if isTeacher()
+        || (signedIn()
+          && !exists(/databases/$(database)/documents/attendance/$(attendanceId)))
+        || (signedIn()
+          && resource.data.rollNumber is string
+          && ownsRollNumber(resource.data.rollNumber));
+      allow list: if isTeacher();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll([
+          'rollNumber', 'studentName', 'classSection', 'attendanceDate',
+          'timestamp', 'status', 'locationVerified'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'rollNumber', 'studentName', 'classSection', 'attendanceDate',
+          'timestamp', 'status', 'locationVerified', 'markedBy'
+        ])
+        && request.resource.data.rollNumber is string
+        && request.resource.data.attendanceDate is string
+        && attendanceId == request.resource.data.attendanceDate
+          + '_' + request.resource.data.rollNumber
+        && request.resource.data.timestamp == request.time
+        && request.resource.data.locationVerified == true
+        && get(studentPath(request.resource.data.rollNumber)).data.fullName
+          == request.resource.data.studentName
+        && get(studentPath(request.resource.data.rollNumber)).data.classSection
+          == request.resource.data.classSection
+        && (
+          (
+            request.resource.data.status == 'Present'
+            && !('markedBy' in request.resource.data)
+            && ownsRollNumber(request.resource.data.rollNumber)
+            && get(studentPath(request.resource.data.rollNumber)).data.hasPhone == true
+          )
+          ||
+          (
+            request.resource.data.status == 'Present (Peer Assisted)'
+            && request.resource.data.markedBy is string
+            && ownsRollNumber(request.resource.data.markedBy)
+            && get(studentPath(request.resource.data.rollNumber)).data.hasPhone == false
+            && get(studentPath(request.resource.data.markedBy)).data.hasPhone == true
+            && exists(attendancePath(
+              request.resource.data.attendanceDate,
+              request.resource.data.markedBy
+            ))
+            && get(attendancePath(
+              request.resource.data.attendanceDate,
+              request.resource.data.markedBy
+            )).data.rollNumber == request.resource.data.markedBy
+            && get(attendancePath(
+              request.resource.data.attendanceDate,
+              request.resource.data.markedBy
+            )).data.status == 'Present'
+            && get(attendancePath(
+              request.resource.data.attendanceDate,
+              request.resource.data.markedBy
+            )).data.locationVerified == true
+          )
+        );
+      allow update, delete: if false;
+    }
+
+    match /config/daily {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create, update: if isTeacher()
+        && request.resource.data.keys().hasOnly(['pin', 'updatedAt', 'updatedBy'])
+        && request.resource.data.keys().hasAll(['pin', 'updatedAt', 'updatedBy'])
+        && request.resource.data.pin is string
+        && request.resource.data.pin.matches('^[0-9]{4}$')
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.updatedBy == request.auth.token.email;
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
